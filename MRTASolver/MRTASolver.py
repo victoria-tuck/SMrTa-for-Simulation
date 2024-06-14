@@ -4,6 +4,7 @@ from .create_randomized_inputs import *
 from .verify import verify, check_sol_consistency
 from .parser import parser
 
+import copy
 import time
 import statistics
 import json
@@ -87,74 +88,29 @@ class MRTASolver:
         self.dps_index = 0
         assert num_aps == self.aps_list[-1]
 
-        num_total_tasks = sum([len(s[0]) for s in self.tasks_stream])
-        max_deadline = max([max([t.get_deadline(self.default_deadline) for t in s[0]]) for s in self.tasks_stream])
-        max_travel_time = math.ceil(max([max(row) for row in room_graph]) / fidelity)
-        max_time = max_deadline + max_travel_time
+        self.num_total_tasks = sum([len(s[0]) for s in self.tasks_stream])
+        self.max_deadline = max([max([t.get_deadline(self.default_deadline) for t in s[0]]) for s in self.tasks_stream])
+        self.max_travel_time = math.ceil(max([max(row) for row in room_graph]) / fidelity)
+        self.max_time = self.max_deadline + self.max_travel_time
 
-        self.create_vars(len(agents), num_aps, self.cap, num_total_tasks, max_time, len(room_graph), self.aps_list)
-        self.build_init_constraints(agents, room_graph, num_aps, capacity, max_time, fidelity)
-        curr_max_deadline = 0
-        sol, prev_sol = None, None
-        num_tasks = 0
+        self.create_vars(len(agents), num_aps, self.cap, self.num_total_tasks, self.max_time, len(room_graph), self.aps_list)
+        self.build_init_constraints(agents, room_graph, num_aps, capacity, self.max_time, fidelity)
+
+        self.max_deadline = 0
+        self.current_solution, self.previous_solution = None, None
+        self.num_tasks = 0
+
+    def allocate_task_stream(self):
         times = []
         results = []
         actions = []
-        for i, (tasks, curr_time) in enumerate(tasks_stream):
+        for i, stream_element in enumerate(self.tasks_stream):
             print(f"Batch {i}")
-            curr_max_deadline = max([t.get_deadline(self.default_deadline) for t in tasks] + [curr_max_deadline])
-            curr_max_time = curr_max_deadline + max_travel_time
-            num_assigned_actions = self.add_task_constraints(agents, tasks, num_aps, curr_time, curr_max_time, i, sol, fidelity)
-            num_tasks += len(tasks)
-            min_dps = self.get_min_dps(len(agents), num_tasks)
-            num_unassigned_actions = self.num_actions - num_assigned_actions
-            actions.append((num_assigned_actions, num_unassigned_actions))
-
-            batch_times = []
-            batch_results = []
-            if basename is None:
-                # Check the satisfiability of the constraints
-                result = Result.unsat
-                while self.dps_index < len(aps_list):
-                    print(f"Using {self.aps_list[self.dps_index]} action points")
-                    if self.aps_list[self.dps_index] < min_dps:
-                        print(f"{num_tasks} tasks / {len(agents)} agents requires at least {self.get_min_dps(len(agents), num_tasks)} action points")
-                        self.dps_index += 1
-                        continue
-                    current_assumes = [self.assumes[self.dps_index]]
-                    if incremental:
-                        solver = self.s
-                    else: # Instantiate new solver
-                        solver = SolverInterface(solver_name, theory)
-                        solver.add(self.s.assertions())
-                    start_of_solve = time.time()
-                    result = solver.check(current_assumes, timeout=timeout)
-                    end_of_solve = time.time()
-                    batch_times.append(end_of_solve - start_of_solve)
-                    batch_results.append(result)
-                    print(f"Result is {result}")
-                    if result == Result.sat: break
-                    self.dps_index += 1
-                times.append(batch_times)
-                results.append(batch_results)
-                if result == Result.sat:
-                    self.debug_print("The constraints are satisfiable.")
-                    print(f"Time to check satisfiability : {times[-1]}s")
-                    if sol is not None:
-                        prev_sol = sol.copy()
-                    # sol = self.extract_and_verify_model(solver, agents, tasks_stream[:i+1], capacity, room_graph, curr_max_time)
-                    sol = self.extract_model(solver)
-                    verify(sol, agents, tasks_stream[:i+1], capacity, room_graph, curr_max_time)
-                    self.debug_print("Model has been verified.")
-                    if prev_sol is not None:
-                        check_sol_consistency(curr_time, prev_sol, sol, self.free_action_points)
-                    self.solutions.append((curr_time, sol))
-                else:
-                    sol = None
-                    self.debug_print('Unsatisfiable')
-                    break
-            else:
-                self.export_benchmark(basename)
+            old_batch_params = copy.deepcopy(batch_params)
+            batch_action_counts, batch_solvetimes, batch_result, batch_params = self.allocate_next_task_set(stream_element, old_batch_params)
+            times.append(batch_solvetimes)
+            results.append(batch_result)
+            actions.append(batch_action_counts)
 
         tot_solve_time = sum([sum(batch_t) for batch_t in times])
         results = [[r.name for r in batch_r] for batch_r in results]
@@ -162,6 +118,73 @@ class MRTASolver:
         print(f'RESULTS: {results}')
         print(f'SOLVE_TIMES: {times}')
         print(f'TOTAL_SOLVE_TIME: {tot_solve_time}')
+
+    def add_task_set_constraints(self, previous_sol, iteration, stream_element, num_tasks, min_dps):
+        tasks, curr_time = stream_element
+        curr_max_deadline = max([t.get_deadline(self.default_deadline) for t in tasks] + [curr_max_deadline])
+        curr_max_time = curr_max_deadline + self.max_travel_time
+        num_assigned_actions = self.add_task_constraints(self.agents, tasks, num_aps, curr_time, curr_max_time, iteration, previous_sol, fidelity)
+        num_tasks += len(tasks)
+        min_dps = self.get_min_dps(len(self.agents), num_tasks)
+        num_unassigned_actions = self.num_actions - num_assigned_actions
+        action_counts = (num_assigned_actions, num_unassigned_actions)
+        params = {num_tasks: num_tasks,
+                  min_dps: min_dps}
+        return action_counts, params
+
+    def allocate_next_task_set(self, previous_sol, iteration, stream_element, old_params):
+        new_params, action_counts = self.add_task_set_constraints(previous_sol, iteration, stream_element, **old_params)
+        solvetimes, result = self.solve_task_allocation(stream_element, **new_params)
+        if result == Result.sat:
+            if previous_sol is not None:
+                sol = self.validate_task_allocation(result, partial_task_stream, curr_time, curr_max_time)
+        else:
+            sol = None
+            self.debug_print('Unsatisfiable')
+
+        return action_counts, solvetimes, result, new_params
+
+    def solve_task_allocation(self, num_tasks, min_dps):
+        batch_times = []
+        batch_results = []
+
+        # Check the satisfiability of the constraints
+        result = Result.unsat
+        while self.dps_index < len(aps_list):
+            print(f"Using {self.aps_list[self.dps_index]} action points")
+            if self.aps_list[self.dps_index] < min_dps:
+                print(f"{num_tasks} tasks / {len(agents)} agents requires at least {self.get_min_dps(len(agents), num_tasks)} action points")
+                self.dps_index += 1
+                continue
+            current_assumes = [self.assumes[self.dps_index]]
+            if self.incremental:
+                solver = self.s
+            else: # Instantiate new solver
+                solver = SolverInterface(self.solver_name, self.theory)
+                solver.add(self.s.assertions())
+            start_of_solve = time.time()
+            result = solver.check(current_assumes, timeout=timeout)
+            end_of_solve = time.time()
+            batch_times.append(end_of_solve - start_of_solve)
+            batch_results.append(result)
+            print(f"Result is {result}")
+            if result == Result.sat: break
+            self.dps_index += 1
+
+        if result == Result.sat:
+            self.debug_print("The constraints are satisfiable.")
+            print(f"Time to check satisfiability : {batch_times}s")
+
+        return batch_times, batch_results
+            
+    def validate_task_allocation(self, prev_sol, result, partial_task_stream, curr_time, curr_max_time):
+        # sol = self.extract_and_verify_model(solver, agents, tasks_stream[:i+1], capacity, room_graph, curr_max_time)
+        sol = self.extract_model(solver)
+        verify(sol, agents, partial_task_stream, capacity, room_graph, curr_max_time)
+        self.debug_print("Model has been verified.")
+        if prev_sol is not None:
+            check_sol_consistency(curr_time, prev_sol, sol, self.free_action_points)
+        self.solutions.append((curr_time, sol))
 
     def debug_print(self, s):
         if self.debug: print(s)
@@ -495,7 +518,8 @@ if __name__ == '__main__':
     room_dictionary = load_weighted_graph()
     room_count, room_graph = dictionary_to_matrix(room_dictionary)
 
-    MRTASolver(solver, theory, agents, tasks_stream, room_graph, capacity, num_aps, fidelity, free_action_points, timeout, basename, default_deadline, aps_list, incremental, verbose)
+    mrtasolver = MRTASolver(solver, theory, agents, tasks_stream, room_graph, capacity, num_aps, fidelity, free_action_points, timeout, basename, default_deadline, aps_list, incremental, verbose)
+    mrtasolver.allocate_task_stream()
 
     # # Create your own benchmark here
     # num_agents = 5
