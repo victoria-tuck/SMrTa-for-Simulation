@@ -4,6 +4,12 @@ from .create_randomized_inputs import *
 from .verify import verify, check_sol_consistency
 from .parser import parser
 
+# from SolverInterface import *
+# from run_realistic_setting import load_weighted_graph, dictionary_to_matrix
+# from create_randomized_inputs import *
+# from verify import verify, check_sol_consistency
+# from parser import parser
+
 import copy
 import time
 import statistics
@@ -76,6 +82,10 @@ class MRTASolver:
         self.incremental = incremental
         self.debug = debug
         self.action_time = 1
+        self.fidelity = 1
+        self.timeout = timeout
+        self.solver_name = solver_name
+        self.room_graph = room_graph
 
         self.s = SolverInterface(solver_name, theory)
 
@@ -100,16 +110,25 @@ class MRTASolver:
         self.current_solution, self.previous_solution = None, None
         self.num_tasks = 0
 
-    def allocate_task_stream(self):
+        self.stream_index = 0
+        self.previous_sol = None
+        self.current_sol = None
+        self.old_batch_params = None
+        self.current_batch_params = None
+
+    def allocate_task_stream(self, basename=None):
         times = []
         results = []
         actions = []
-        for i, stream_element in enumerate(self.tasks_stream):
-            print(f"Batch {i}")
+        previous_sol = None
+        batch_params = None
+        for stream_index in range(len(self.tasks_stream)):
+            print(f"Batch {stream_index}")
             old_batch_params = copy.deepcopy(batch_params)
-            batch_action_counts, batch_solvetimes, batch_result, batch_params = self.allocate_next_task_set(stream_element, old_batch_params)
+            batch_action_counts, batch_solvetimes, batch_results, batch_result, batch_sol, batch_params = self.allocate_task_set(stream_index, previous_sol, old_batch_params, basename)
+            previous_sol = batch_sol
             times.append(batch_solvetimes)
-            results.append(batch_result)
+            results.append(batch_results)
             actions.append(batch_action_counts)
 
         tot_solve_time = sum([sum(batch_t) for batch_t in times])
@@ -119,30 +138,52 @@ class MRTASolver:
         print(f'SOLVE_TIMES: {times}')
         print(f'TOTAL_SOLVE_TIME: {tot_solve_time}')
 
-    def add_task_set_constraints(self, previous_sol, iteration, stream_element, num_tasks, min_dps):
+    def allocate_next_task_set(self):
+        self.previous_sol = self.current_sol
+        self.old_batch_params = self.current_batch_params
+        _, _, _, _, sol, batch_params = self.allocate_task_set(self.stream_index, self.previous_sol, self.old_batch_params, None)
+        self.current_sol = sol
+        self.current_batch_params = batch_params
+        self.stream_index += 1
+        return sol
+
+    def add_task_set_constraints(self, previous_sol, iteration, stream_element, num_tasks, min_dps, curr_time, curr_max_deadline, curr_max_time):
         tasks, curr_time = stream_element
         curr_max_deadline = max([t.get_deadline(self.default_deadline) for t in tasks] + [curr_max_deadline])
         curr_max_time = curr_max_deadline + self.max_travel_time
-        num_assigned_actions = self.add_task_constraints(self.agents, tasks, num_aps, curr_time, curr_max_time, iteration, previous_sol, fidelity)
+        num_assigned_actions = self.add_task_constraints(self.agents, tasks, self.num_aps, curr_time, curr_max_time, iteration, previous_sol, self.fidelity)
         num_tasks += len(tasks)
         min_dps = self.get_min_dps(len(self.agents), num_tasks)
         num_unassigned_actions = self.num_actions - num_assigned_actions
         action_counts = (num_assigned_actions, num_unassigned_actions)
-        params = {num_tasks: num_tasks,
-                  min_dps: min_dps}
+        params = {'num_tasks': num_tasks,
+                  'min_dps': min_dps,
+                  'curr_time': curr_time,
+                  'curr_max_deadline': curr_max_deadline,
+                  'curr_max_time': curr_max_time}
         return action_counts, params
 
-    def allocate_next_task_set(self, previous_sol, iteration, stream_element, old_params):
-        new_params, action_counts = self.add_task_set_constraints(previous_sol, iteration, stream_element, **old_params)
-        solvetimes, result = self.solve_task_allocation(stream_element, **new_params)
-        if result == Result.sat:
-            if previous_sol is not None:
-                sol = self.validate_task_allocation(result, partial_task_stream, curr_time, curr_max_time)
+    def allocate_task_set(self, iteration, previous_sol, old_params, basename=None):
+        if old_params == None:
+            old_params = {'num_tasks': 0,
+                        'min_dps': 1,
+                        'curr_time': 0,
+                        'curr_max_deadline': 0,
+                        'curr_max_time': 0}
+        action_counts, new_params = self.add_task_set_constraints(previous_sol, iteration, self.tasks_stream[iteration], **old_params)
+        if basename is None:
+            solvetimes, results, result, solver = self.solve_task_allocation(new_params['num_tasks'], new_params['min_dps'])
+            if result == Result.sat:
+                curr_time, curr_max_time = new_params['curr_time'], new_params['curr_max_time']
+                print("Validating solution...")
+                sol = self.validate_task_allocation(previous_sol, self.tasks_stream[:iteration+1], solver, curr_time, curr_max_time)
+            else:
+                sol = None
+                self.debug_print('Unsatisfiable')
+            return action_counts, solvetimes, results, result, sol, new_params
         else:
-            sol = None
-            self.debug_print('Unsatisfiable')
-
-        return action_counts, solvetimes, result, new_params
+            self.export_benchmark(basename)
+            return action_counts, None, None, None, new_params
 
     def solve_task_allocation(self, num_tasks, min_dps):
         batch_times = []
@@ -150,10 +191,10 @@ class MRTASolver:
 
         # Check the satisfiability of the constraints
         result = Result.unsat
-        while self.dps_index < len(aps_list):
+        while self.dps_index < len(self.aps_list):
             print(f"Using {self.aps_list[self.dps_index]} action points")
             if self.aps_list[self.dps_index] < min_dps:
-                print(f"{num_tasks} tasks / {len(agents)} agents requires at least {self.get_min_dps(len(agents), num_tasks)} action points")
+                print(f"{num_tasks} tasks / {len(self.agents)} agents requires at least {self.get_min_dps(len(self.agents), num_tasks)} action points")
                 self.dps_index += 1
                 continue
             current_assumes = [self.assumes[self.dps_index]]
@@ -163,7 +204,7 @@ class MRTASolver:
                 solver = SolverInterface(self.solver_name, self.theory)
                 solver.add(self.s.assertions())
             start_of_solve = time.time()
-            result = solver.check(current_assumes, timeout=timeout)
+            result = solver.check(current_assumes, timeout=self.timeout)
             end_of_solve = time.time()
             batch_times.append(end_of_solve - start_of_solve)
             batch_results.append(result)
@@ -175,16 +216,19 @@ class MRTASolver:
             self.debug_print("The constraints are satisfiable.")
             print(f"Time to check satisfiability : {batch_times}s")
 
-        return batch_times, batch_results
+        return batch_times, batch_results, result, solver
             
-    def validate_task_allocation(self, prev_sol, result, partial_task_stream, curr_time, curr_max_time):
+    def validate_task_allocation(self, prev_sol, partial_task_stream, solver, curr_time, curr_max_time):
         # sol = self.extract_and_verify_model(solver, agents, tasks_stream[:i+1], capacity, room_graph, curr_max_time)
         sol = self.extract_model(solver)
-        verify(sol, agents, partial_task_stream, capacity, room_graph, curr_max_time)
+        verify(sol, self.agents, partial_task_stream, self.cap, self.room_graph, curr_max_time)
         self.debug_print("Model has been verified.")
         if prev_sol is not None:
             check_sol_consistency(curr_time, prev_sol, sol, self.free_action_points)
         self.solutions.append((curr_time, sol))
+        print(f"Solutions: {self.solutions}")
+
+        return sol
 
     def debug_print(self, s):
         if self.debug: print(s)
