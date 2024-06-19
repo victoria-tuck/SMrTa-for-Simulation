@@ -108,7 +108,8 @@ def check_sol_consistency(curr_time, prev_sol, sol, free_action_points):
     for agt_id, (prev_agt, agt) in enumerate(zip(prev_sol['agt'], sol['agt'])):
         for i, (prevt, prevc, previd, previd2, t, c, id, id2) in \
             enumerate(zip(prev_agt['t'], prev_agt['c'], prev_agt['id'], prev_agt['id'][1:], agt['t'], agt['c'], agt['id'], agt['id'][1:])):
-            assert prevt == t and prevc == c and previd == id
+            # assert prevt == t and prevc == c and previd == id
+            assert prevc == c and previd == id
             if free_action_points:
                 # We only break early if we're allowed to free previously allocated actions
                 if prevt >= curr_time:

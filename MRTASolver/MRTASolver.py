@@ -138,9 +138,11 @@ class MRTASolver:
         print(f'SOLVE_TIMES: {times}')
         print(f'TOTAL_SOLVE_TIME: {tot_solve_time}')
 
-    def allocate_next_task_set(self):
+    def allocate_next_task_set(self, actual_agent_arrivals=None):
         self.previous_sol = self.current_sol
         self.old_batch_params = self.current_batch_params
+        self.actual_agent_arrivals = [[math.ceil(new_time) for new_time in agent_times] for agent_times in actual_agent_arrivals]
+        print(f"Actual agent arrivals: {self.actual_agent_arrivals}")
         _, _, _, _, sol, batch_params = self.allocate_task_set(self.stream_index, self.previous_sol, self.old_batch_params, None)
         self.current_sol = sol
         self.current_batch_params = batch_params
@@ -406,18 +408,28 @@ class MRTASolver:
                     current_dps_ind += 1
 
         self.num_actions = num_agents
-
     
-    def get_assigned_actions(self, agent_id, sol, curr_time):
+    def get_past_actions(self, agent_id, sol, curr_time):
         next_free_dp = 1
         assertions = []
+        actual_times = self.actual_agent_arrivals[agent_id]
         if sol is not None:
             self.debug_print(f"Agent {agent_id} asserts:")
             prev_solve = sol['agt'][agent_id]
+            last_time = prev_solve['t'][0]
             for ind in range(len(prev_solve['t'])):
-                self.debug_print(f"\t{self.agt_action[agent_id][ind] == sol['agt'][agent_id]['id'][ind]}")
-                assertions.append(self.agt_action[agent_id][ind] == sol['agt'][agent_id]['id'][ind])
-                assertions.append(self.agt_time[agent_id][ind] == prev_solve['t'][ind])
+                if ind != 0:
+                    if len(actual_times) > ind:
+                        updated_time = actual_times[ind-1]
+                        assertions.append(self.agt_time[agent_id][ind] == updated_time)
+                    else:
+                        anticipated_travel_time = prev_solve['t'][ind] - prev_solve['t'][ind-1]
+                        updated_time = last_time + anticipated_travel_time
+                        assertions.append(self.agt_time[agent_id][ind] == updated_time)
+                    last_time = updated_time
+                else:
+                    assertions.append(self.agt_time[agent_id][ind] == prev_solve['t'][ind])
+                assertions.append(self.agt_action[agent_id][ind] == prev_solve['id'][ind])
                 assertions.append(self.agt_cap[agent_id][ind] == prev_solve['c'][ind])
                 next_free_dp = ind + 1
                 if self.free_action_points:
@@ -434,7 +446,6 @@ class MRTASolver:
                     break
         assert next_free_dp >= 1
         return assertions, next_free_dp
-                                  
 
     def add_task_constraints(self, agents, tasks, num_aps, curr_time, curr_max_time, task_set_k, sol, fidelity):
         if self.s.num_scopes() > 0:
@@ -459,7 +470,7 @@ class MRTASolver:
         # Constraints for each agent
         for agent_id in range(num_agents):
             # Constrain decision points from the previous solve that are in the past or that the agent is current working towards
-            assertions, next_free_dp = self.get_assigned_actions(agent_id, sol, curr_time)
+            assertions, next_free_dp = self.get_past_actions(agent_id, sol, curr_time)
             self.s.add(assertions)
             num_assigned_dps += len(assertions) // 3
             self.debug_print(f"Agent {agent_id} next free dp: {next_free_dp}")
