@@ -61,7 +61,8 @@ class MRTASolver:
                  tasks_stream, 
                  room_graph, 
                  capacity, 
-                 num_aps, 
+                 num_aps,
+                 num_locations=0,
                  fidelity=1, 
                  free_action_points=True, 
                  timeout=None, 
@@ -86,6 +87,8 @@ class MRTASolver:
         self.timeout = timeout
         self.solver_name = solver_name
         self.room_graph = room_graph
+        self.num_locations = num_locations
+        print(self.num_locations)
 
         self.s = SolverInterface(solver_name, theory)
 
@@ -99,7 +102,8 @@ class MRTASolver:
         assert num_aps == self.aps_list[-1]
 
         self.num_total_tasks = sum([len(s[0]) for s in self.tasks_stream])
-        self.max_deadline = max([max([t.get_deadline(self.default_deadline) for t in s[0]]) for s in self.tasks_stream])
+        # self.max_deadline = max([max([t.get_deadline(self.default_deadline) for t in s[0]]) for s in self.tasks_stream])
+        self.max_deadline = 100
         self.max_travel_time = math.ceil(max([max(row) for row in room_graph]) / fidelity)
         self.max_time = self.max_deadline + self.max_travel_time
 
@@ -277,7 +281,7 @@ class MRTASolver:
         # Determine how many bits are needed to represent each literal
         self.time_bit = get_bits(max_time)
         self.cap_bit  = get_bits(cap)
-        self.task_bit = get_bits(2 * num_total_tasks + num_agts) # Need to account for all tasks across all solves at start
+        self.task_bit = get_bits(2 * num_total_tasks + num_agts + self.num_locations) # Need to account for all tasks across all solves at start
         self.agt_bit  = get_bits(num_agts)
         self.room_bit = get_bits(num_rooms)
 
@@ -329,10 +333,12 @@ class MRTASolver:
     def build_init_constraints(self, agents, room_graph, num_aps, capacity, max_time, fidelity):
         num_agents = len(agents)
         num_rooms = len(room_graph)
+        num_locations = int(len(room_graph)/2) ## ToDo: Change to variable passed
 
         # Define the behavior of the functions given initial set of tasks
         dist_defs = [self.DistFunc(i, j) == math.ceil(room_graph[i][j]/fidelity) for i in range(num_rooms) for j in range(num_rooms)]
         room_defs = [self.RoomFunc(i) == agents[i].start for i in range(num_agents)]
+        room_defs += [self.RoomFunc(i + num_agents) == i for i in range(num_locations)]
         self.s.add(room_defs)
         self.s.add(dist_defs)
 
@@ -356,26 +362,28 @@ class MRTASolver:
 
                 # Capacity constraints for QF_UFBV
                 # 0 1 2 (3 4)
+                num_prev_ids = num_agents + self.num_locations
                 if self.theory == 'QF_UFBV':
                     one = BitVecVal(1, self.cap_bit)
                     zero = BitVecVal(0, self.cap_bit)
-                    a = If(And(self.agt_action[agent_id][t] & 1 == num_agents % 2, # 1 or 0
-                               self.agt_action[agent_id][t] >= num_agents),
+                    a = If(And(self.agt_action[agent_id][t] & 1 == num_prev_ids % 2, # 1 or 0
+                               self.agt_action[agent_id][t] >= num_prev_ids),
                            one, zero)
-                    b = If(And(self.agt_action[agent_id][t] & 1 == abs(num_agents % 2 - 1), # 0 or 1
-                               self.agt_action[agent_id][t] >= num_agents),
+                    b = If(And(self.agt_action[agent_id][t] & 1 == abs(num_prev_ids % 2 - 1), # 0 or 1
+                               self.agt_action[agent_id][t] >= num_prev_ids),
                            one, zero)
                 elif self.theory == 'QF_UFLIA': 
                     # Note: x % 2 == 0 will probably be translated into x == 2 * k with a fresh int var k
-                    a = If(And(self.agt_action[agent_id][t] % 2 == num_agents % 2, # 1 or 0
-                               self.agt_action[agent_id][t] >= num_agents),
+                    a = If(And(self.agt_action[agent_id][t] % 2 == num_prev_ids % 2, # 1 or 0
+                               self.agt_action[agent_id][t] >= num_prev_ids),
                            1, 0)
-                    b = If(And(self.agt_action[agent_id][t] % 2 == abs(num_agents % 2 - 1), # 0 or 1
-                               self.agt_action[agent_id][t] >= num_agents),
+                    b = If(And(self.agt_action[agent_id][t] % 2 == abs(num_prev_ids % 2 - 1), # 0 or 1
+                               self.agt_action[agent_id][t] >= num_prev_ids),
                            1, 0)
                 else:
                     raise NotImplementedError
                 self.s.add(self.agt_cap[agent_id][t] == self.agt_cap[agent_id][t-1] + a - b)
+                self.s.add(self.agt_time[agent_id][t] >= self.agt_time[agent_id][t-1])
 
                 # CAN BE REMOVED?
                 # THIS CONSTRAINT CANNOT BE ADDED because all times of unused action points are assigned to max_time
@@ -462,8 +470,8 @@ class MRTASolver:
 
         room_defs = []
         for i in range(num_tasks):
-            room_defs += [self.RoomFunc(2*i + self.num_actions) == tasks[i].start,
-                          self.RoomFunc(2*i + 1 + self.num_actions) == tasks[i].end]
+            room_defs += [self.RoomFunc(2*i + self.num_actions + self.num_locations) == tasks[i].start,
+                          self.RoomFunc(2*i + 1 + self.num_actions + self.num_locations) == tasks[i].end]
         self.s.add(room_defs)
 
         num_assigned_dps = 0
@@ -481,13 +489,13 @@ class MRTASolver:
                 # Valid action ids
                 constraints_to_pop.append(Implies(self.agt_action[agent_id][t] != agent_id,
                                                   And(self.agt_action[agent_id][t] >= num_agents, 
-                                                      self.agt_action[agent_id][t] < num_tasks*2 + self.num_actions)))
+                                                      self.agt_action[agent_id][t] < num_tasks*2 + self.num_actions + self.num_locations)))
                 for n in range(num_tasks):
                     # Constrain that for each item, if an agent picks up that item (act = n_id),
                     # 1. the start time for that task is the same time as when the agent pick ups the item
                     # 2. the item is assigned to that agent
                     # 3. the agent will drop the item later (act will be n_id + num_tasks1 at later decision point)
-                    pickup_id = n * 2 + self.num_actions
+                    pickup_id = n * 2 + self.num_actions + self.num_locations
                     dropoff_id = pickup_id + 1
                     drop_later = Or([id == dropoff_id for id in self.agt_action[agent_id][t+1:]])
                     self.s.add(Implies(self.agt_action[agent_id][t] == pickup_id, 
@@ -502,6 +510,10 @@ class MRTASolver:
                     self.s.add(Implies(self.agt_action[agent_id][t] == dropoff_id,
                                   And(task_drop[n] == self.agt_time[agent_id][t],
                                       t2a[n] == agent_id)))
+                
+                if t != num_aps:
+                    self.s.add(Implies(self.agt_action[agent_id][t] != agent_id,
+                                   Or([self.agt_action[agent_id][tau] >= self.num_actions + self.num_locations  for tau in range(t, min(t+3, num_aps))])))    
 
                 # Constrain that time for any decision point is less than the max task deadline
                 # constraints_to_pop.append(self.agt_time[agent_id][t] <= curr_max_time)
@@ -513,13 +525,19 @@ class MRTASolver:
                 current_room = self.RoomFunc(self.agt_action[agent_id][t])
                 travel_time = self.DistFunc(last_room, current_room)
                 prev_time = self.agt_time[agent_id][t-1]
-                constraints_to_pop.append(Implies(self.agt_action[agent_id][t] >= num_agents,
+                # constraints_to_pop.append(Implies(And(self.agt_action[agent_id][t] >= num_agents, self.agt_action[agent_id][t] < num_agents + self.num_locations),
+                #                                   self.agt_time[agent_id][t] == If(prev_time <= curr_time, curr_time_val, prev_time) + travel_time))
+                # constraints_to_pop.append(Implies(self.agt_action[agent_id][t] >= num_agents + self.num_locations,
+                #                                   self.agt_time[agent_id][t] == If(prev_time <= curr_time, curr_time_val, prev_time) + travel_time + self.action_time))
+                constraints_to_pop.append(Implies(And(self.agt_action[agent_id][t] >= num_agents, self.agt_action[agent_id][t] < num_agents + self.num_locations),
+                                                  self.agt_time[agent_id][t] == If(prev_time <= curr_time, curr_time_val, prev_time) + travel_time))
+                constraints_to_pop.append(Implies(self.agt_action[agent_id][t] >= num_agents + self.num_locations,
                                                   self.agt_time[agent_id][t] == If(prev_time <= curr_time, curr_time_val, prev_time) + travel_time + self.action_time))
 
 
         # Constraints on the task tuples (task_start, task_drop, agent)
         for i in range(num_tasks):
-            a_id = i * 2 + self.num_actions
+            a_id = i * 2 + self.num_actions + self.num_locations
 
             for agent_id in range(num_agents):
                 # Constrain that if a task is assigned an agent that that agent at some point starts that task
@@ -535,10 +553,12 @@ class MRTASolver:
             
             # Constrain that the task drop time should be greater than the sum of the task start time and the minimum travel time
             # (the time to complete the task if directly going from start to end location)
-            self.s.add(task_drop[i] >= task_start[i] + self.DistFunc(self.RoomFunc(a_id), self.RoomFunc(a_id + 1)))
+            # self.s.add(task_drop[i] >= task_start[i] + self.DistFunc(self.RoomFunc(a_id), self.RoomFunc(a_id + 1)))
+            self.s.add(task_drop[i] >= task_start[i])
             
             # Constrain that the task drop time is less than or equal to the deadline for that task
             self.s.add(task_drop[i] <= math.floor(tasks[i].get_deadline(self.default_deadline)/fidelity))
+            print(f"Adding deadline for task {i}: {tasks[i].get_deadline(self.default_deadline)}")
 
         self.s.push()
         for constraint in constraints_to_pop:
