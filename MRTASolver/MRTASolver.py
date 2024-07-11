@@ -514,7 +514,7 @@ class MRTASolver:
                 travel_time = self.DistFunc(last_room, current_room)
                 prev_time = self.agt_time[agent_id][t-1]
                 constraints_to_pop.append(Implies(self.agt_action[agent_id][t] >= num_agents,
-                                                  self.agt_time[agent_id][t] == If(prev_time <= curr_time, curr_time_val, prev_time) + travel_time + self.action_time))
+                                                  self.agt_time[agent_id][t] >= If(prev_time <= curr_time, curr_time_val, prev_time) + travel_time + self.action_time))
 
 
         # Constraints on the task tuples (task_start, task_drop, agent)
@@ -539,6 +539,25 @@ class MRTASolver:
             
             # Constrain that the task drop time is less than or equal to the deadline for that task
             self.s.add(task_drop[i] <= math.floor(tasks[i].get_deadline(self.default_deadline)/fidelity))
+
+        
+        # Find tasks that have overlapping positions
+        Q_t = []
+        for i in range(num_tasks):
+            for j in range(i+1, num_tasks):
+                if tasks[i].start == tasks[j].start:
+                    Q_t.append((task_start[i], task_start[j]))
+                elif tasks[i].start == tasks[j].end:
+                    Q_t.append((task_start[i], task_drop[j]))
+                elif tasks[i].end == tasks[j].start:
+                    Q_t.append((task_drop[i], task_start[j]))
+                elif tasks[i].end == tasks[j].end:
+                    Q_t.append((task_drop[i], task_drop[j]))
+        time_difference = 30
+        for time1, time2 in Q_t:
+            self.s.add(Or(time1 >= time2 + time_difference,
+                          time2 >= time1 + time_difference))
+        
 
         self.s.push()
         for constraint in constraints_to_pop:
