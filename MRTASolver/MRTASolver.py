@@ -535,8 +535,9 @@ class MRTASolver:
             
             # Constrain that the task drop time should be greater than the sum of the task start time and the minimum travel time
             # (the time to complete the task if directly going from start to end location)
-            self.s.add(task_drop[i] >= task_start[i] + self.DistFunc(self.RoomFunc(a_id), self.RoomFunc(a_id + 1)))
-            
+            # self.s.add(task_drop[i] >= task_start[i] + self.DistFunc(self.RoomFunc(a_id), self.RoomFunc(a_id + 1)))
+            self.s.add(task_drop[i] >= task_start[i])
+
             # Constrain that the task drop time is less than or equal to the deadline for that task
             self.s.add(task_drop[i] <= math.floor(tasks[i].get_deadline(self.default_deadline)/fidelity))
 
