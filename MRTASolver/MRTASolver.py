@@ -554,7 +554,7 @@ class MRTASolver:
                     Q_t.append((task_drop[i], task_start[j]))
                 elif tasks[i].end == tasks[j].end:
                     Q_t.append((task_drop[i], task_drop[j]))
-        time_difference = 30
+        time_difference = 60
         for time1, time2 in Q_t:
             self.s.add(Or(time1 >= time2 + time_difference,
                           time2 >= time1 + time_difference))
